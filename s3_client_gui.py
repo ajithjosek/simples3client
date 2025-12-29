@@ -5,6 +5,17 @@ from botocore.exceptions import ClientError, NoCredentialsError
 import os
 from dotenv import load_dotenv
 import threading
+import logging
+
+# Set up console logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),  # Console output
+    ]
+)
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -97,13 +108,17 @@ class S3ClientGUI:
     
     def connect_to_s3(self):
         try:
+            logger.info("Initializing S3 client...")
             self.s3_client = boto3.client('s3')
+            logger.info("S3 client initialized successfully")
             # Skip connection test - we'll validate when accessing specific bucket
             self.status_label.config(text="Status: Ready", foreground="green")
-        except NoCredentialsError:
+        except NoCredentialsError as e:
+            logger.error(f"No AWS credentials found: {e}")
             messagebox.showerror("Error", "AWS credentials not found. Please configure .env file.")
             self.status_label.config(text="Status: No credentials", foreground="red")
         except Exception as e:
+            logger.error(f"Failed to initialize S3 client: {e}")
             messagebox.showerror("Error", f"Failed to initialize S3 client: {str(e)}")
             self.status_label.config(text="Status: Initialization failed", foreground="red")
     
@@ -122,6 +137,8 @@ class S3ClientGUI:
             messagebox.showerror("Error", "S3 client not initialized")
             return
         
+        logger.info(f"Attempting to load bucket: {bucket_name}")
+        
         # Skip bucket validation - go directly to listing objects
         # This will fail gracefully if bucket doesn't exist or no access
         self.current_bucket = bucket_name
@@ -131,8 +148,10 @@ class S3ClientGUI:
         try:
             self.load_objects()
             self.status_label.config(text=f"Status: Connected to {bucket_name}", foreground="green")
-        except Exception:
+            logger.info(f"Successfully loaded bucket: {bucket_name}")
+        except Exception as e:
             # Error will be shown by load_objects(), just reset status
+            logger.error(f"Failed to load bucket {bucket_name}: {e}")
             self.current_bucket = None
             self.status_label.config(text="Status: Ready", foreground="orange")
     
@@ -140,11 +159,13 @@ class S3ClientGUI:
         if not self.s3_client or not self.current_bucket:
             return
         
+        logger.info(f"Loading objects from bucket: {self.current_bucket}")
         self.object_tree.delete(*self.object_tree.get_children())
         
         try:
             # Get current prefix from entry
             current_prefix = self.prefix_var.get().strip()
+            logger.info(f"Using prefix: '{current_prefix}'")
             
             # List objects with prefix if specified
             kwargs = {'Bucket': self.current_bucket}
@@ -153,15 +174,19 @@ class S3ClientGUI:
                 if not current_prefix.endswith('/'):
                     kwargs['Prefix'] += '/'
             
+            logger.info(f"Calling list_objects_v2 with kwargs: {kwargs}")
             response = self.s3_client.list_objects_v2(**kwargs)
+            logger.info(f"list_objects_v2 response keys: {list(response.keys())}")
             
             if 'Contents' in response:
+                logger.info(f"Found {len(response['Contents'])} objects")
                 # Group objects by folders
                 folders = set()
                 files = []
                 
                 for obj in response['Contents']:
                     key = obj['Key']
+                    logger.debug(f"Processing object: {key}")
                     
                     # Remove current prefix from display
                     display_key = key
@@ -189,10 +214,19 @@ class S3ClientGUI:
                     modified = obj['LastModified'].strftime('%Y-%m-%d %H:%M:%S')
                     self.object_tree.insert('', tk.END, text='📄', 
                                           values=(display_key, size, modified))
+                
+                logger.info(f"Displayed {len(folders)} folders and {len(files)} files")
+            else:
+                logger.info("No 'Contents' key in response - bucket is empty or prefix has no matches")
                                           
         except ClientError as e:
             error_code = e.response['Error']['Code']
+            error_message = e.response['Error']['Message']
+            logger.error(f"AWS ClientError - Code: {error_code}, Message: {error_message}")
+            logger.error(f"Full error response: {e.response}")
+            
             if error_code == 'AccessDenied':
+                logger.error(f"Access denied for bucket '{self.current_bucket}' - check IAM permissions")
                 messagebox.showerror("Permission Error", 
                     f"Access denied when listing objects in bucket '{self.current_bucket}'.\n\n"
                     f"Required permissions for bucket '{self.current_bucket}':\n"
@@ -200,12 +234,16 @@ class S3ClientGUI:
                     f"- s3:GetObject (for downloads)\n"
                     f"- s3:PutObject (for uploads)\n"
                     f"- s3:DeleteObject (for deletions)\n\n"
+                    f"AWS Error: {error_message}\n\n"
                     f"Please contact your AWS administrator to grant these permissions.")
             elif error_code == 'NoSuchBucket':
+                logger.error(f"Bucket '{self.current_bucket}' does not exist")
                 messagebox.showerror("Error", f"Bucket '{self.current_bucket}' does not exist or you don't have access to it.")
             else:
-                messagebox.showerror("Error", f"AWS Error ({error_code}): {e.response['Error']['Message']}")
+                logger.error(f"Unexpected AWS error: {error_code} - {error_message}")
+                messagebox.showerror("Error", f"AWS Error ({error_code}): {error_message}")
         except Exception as e:
+            logger.error(f"Unexpected error loading objects: {e}", exc_info=True)
             messagebox.showerror("Error", f"Failed to load objects: {str(e)}")
     
     def on_object_double_click(self, event):
@@ -256,6 +294,8 @@ class S3ClientGUI:
         else:
             s3_key = file_name
         
+        logger.info(f"Uploading file: {file_path} -> s3://{self.current_bucket}/{s3_key}")
+        
         # Ask user to confirm the upload path
         confirm_msg = f"Upload '{file_name}' as:\n'{s3_key}'\n\nProceed?"
         if not messagebox.askyesno("Confirm Upload", confirm_msg):
@@ -263,15 +303,21 @@ class S3ClientGUI:
         
         try:
             self.s3_client.upload_file(file_path, self.current_bucket, s3_key)
+            logger.info(f"Successfully uploaded: {s3_key}")
             messagebox.showinfo("Success", f"File uploaded as '{s3_key}'")
             self.load_objects()
         except ClientError as e:
             error_code = e.response['Error']['Code']
+            error_message = e.response['Error']['Message']
+            logger.error(f"Upload failed - AWS ClientError - Code: {error_code}, Message: {error_message}")
+            logger.error(f"Full error response: {e.response}")
+            
             if error_code == 'AccessDenied':
-                messagebox.showerror("Permission Error", "Access denied when uploading file. You need 's3:PutObject' permission.")
+                messagebox.showerror("Permission Error", f"Access denied when uploading file. You need 's3:PutObject' permission.\n\nAWS Error: {error_message}")
             else:
-                messagebox.showerror("Error", f"AWS Error ({error_code}): {e.response['Error']['Message']}")
+                messagebox.showerror("Error", f"AWS Error ({error_code}): {error_message}")
         except Exception as e:
+            logger.error(f"Upload failed with unexpected error: {e}", exc_info=True)
             messagebox.showerror("Error", f"Failed to upload file: {str(e)}")
     
     def download_file(self):
@@ -297,22 +343,30 @@ class S3ClientGUI:
         else:
             object_key = display_name
         
+        logger.info(f"Downloading file: s3://{self.current_bucket}/{object_key}")
+        
         save_path = filedialog.asksaveasfilename(initialfile=display_name)
         if not save_path:
             return
         
         try:
             self.s3_client.download_file(self.current_bucket, object_key, save_path)
+            logger.info(f"Successfully downloaded to: {save_path}")
             messagebox.showinfo("Success", f"File downloaded to '{save_path}'")
         except ClientError as e:
             error_code = e.response['Error']['Code']
+            error_message = e.response['Error']['Message']
+            logger.error(f"Download failed - AWS ClientError - Code: {error_code}, Message: {error_message}")
+            logger.error(f"Full error response: {e.response}")
+            
             if error_code == 'AccessDenied':
-                messagebox.showerror("Permission Error", "Access denied when downloading file. You need 's3:GetObject' permission.")
+                messagebox.showerror("Permission Error", f"Access denied when downloading file. You need 's3:GetObject' permission.\n\nAWS Error: {error_message}")
             elif error_code == 'NoSuchKey':
                 messagebox.showerror("Error", f"File '{object_key}' not found in bucket.")
             else:
-                messagebox.showerror("Error", f"AWS Error ({error_code}): {e.response['Error']['Message']}")
+                messagebox.showerror("Error", f"AWS Error ({error_code}): {error_message}")
         except Exception as e:
+            logger.error(f"Download failed with unexpected error: {e}", exc_info=True)
             messagebox.showerror("Error", f"Failed to download file: {str(e)}")
     
     def delete_file(self):
@@ -338,18 +392,26 @@ class S3ClientGUI:
         else:
             object_key = display_name
         
+        logger.info(f"Deleting file: s3://{self.current_bucket}/{object_key}")
+        
         if messagebox.askyesno("Confirm", f"Delete file '{object_key}'?"):
             try:
                 self.s3_client.delete_object(Bucket=self.current_bucket, Key=object_key)
+                logger.info(f"Successfully deleted: {object_key}")
                 messagebox.showinfo("Success", f"File '{object_key}' deleted")
                 self.load_objects()
             except ClientError as e:
                 error_code = e.response['Error']['Code']
+                error_message = e.response['Error']['Message']
+                logger.error(f"Delete failed - AWS ClientError - Code: {error_code}, Message: {error_message}")
+                logger.error(f"Full error response: {e.response}")
+                
                 if error_code == 'AccessDenied':
-                    messagebox.showerror("Permission Error", "Access denied when deleting file. You need 's3:DeleteObject' permission.")
+                    messagebox.showerror("Permission Error", f"Access denied when deleting file. You need 's3:DeleteObject' permission.\n\nAWS Error: {error_message}")
                 else:
-                    messagebox.showerror("Error", f"AWS Error ({error_code}): {e.response['Error']['Message']}")
+                    messagebox.showerror("Error", f"AWS Error ({error_code}): {error_message}")
             except Exception as e:
+                logger.error(f"Delete failed with unexpected error: {e}", exc_info=True)
                 messagebox.showerror("Error", f"Failed to delete file: {str(e)}")
     
     def go_up_folder(self):
