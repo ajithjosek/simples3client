@@ -24,8 +24,8 @@ class S3ClientGUI:
         default_bucket = os.getenv('DEFAULT_BUCKET_NAME', '')
         if default_bucket:
             self.bucket_var.set(default_bucket)
-            self.current_bucket = default_bucket
-            self.load_objects()
+            # Auto-load the default bucket
+            self.load_bucket()
     
     def setup_ui(self):
         # Top frame for connection status and bucket input
@@ -98,36 +98,14 @@ class S3ClientGUI:
     def connect_to_s3(self):
         try:
             self.s3_client = boto3.client('s3')
-            # Test connection with minimal permissions
-            self.s3_client.list_buckets()
-            self.status_label.config(text="Status: Connected", foreground="green")
+            # Skip connection test - we'll validate when accessing specific bucket
+            self.status_label.config(text="Status: Ready", foreground="green")
         except NoCredentialsError:
             messagebox.showerror("Error", "AWS credentials not found. Please configure .env file.")
             self.status_label.config(text="Status: No credentials", foreground="red")
-        except ClientError as e:
-            error_code = e.response['Error']['Code']
-            if error_code == 'AccessDenied':
-                messagebox.showerror("Permission Error", 
-                    "Access denied. Your AWS credentials don't have S3 permissions.\n\n"
-                    "Required permissions:\n"
-                    "- s3:ListBucket\n"
-                    "- s3:GetObject\n"
-                    "- s3:PutObject\n"
-                    "- s3:DeleteObject\n\n"
-                    "Please contact your AWS administrator to grant these permissions.")
-                self.status_label.config(text="Status: Access denied", foreground="red")
-            elif error_code == 'InvalidAccessKeyId':
-                messagebox.showerror("Error", "Invalid AWS Access Key ID. Please check your credentials.")
-                self.status_label.config(text="Status: Invalid credentials", foreground="red")
-            elif error_code == 'SignatureDoesNotMatch':
-                messagebox.showerror("Error", "Invalid AWS Secret Access Key. Please check your credentials.")
-                self.status_label.config(text="Status: Invalid credentials", foreground="red")
-            else:
-                messagebox.showerror("Error", f"AWS Error ({error_code}): {e.response['Error']['Message']}")
-                self.status_label.config(text="Status: Connection failed", foreground="red")
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to connect: {str(e)}")
-            self.status_label.config(text="Status: Connection failed", foreground="red")
+            messagebox.showerror("Error", f"Failed to initialize S3 client: {str(e)}")
+            self.status_label.config(text="Status: Initialization failed", foreground="red")
     
     def on_bucket_change(self, event):
         """Handle Enter key press in bucket entry"""
@@ -141,26 +119,22 @@ class S3ClientGUI:
             return
         
         if not self.s3_client:
-            messagebox.showerror("Error", "Not connected to AWS S3")
+            messagebox.showerror("Error", "S3 client not initialized")
             return
         
-        # Test if bucket exists and is accessible
+        # Skip bucket validation - go directly to listing objects
+        # This will fail gracefully if bucket doesn't exist or no access
+        self.current_bucket = bucket_name
+        self.prefix_var.set('')  # Clear prefix when switching buckets
+        
+        # Try to load objects - this will show appropriate error if bucket is inaccessible
         try:
-            self.s3_client.head_bucket(Bucket=bucket_name)
-            self.current_bucket = bucket_name
-            self.prefix_var.set('')  # Clear prefix when switching buckets
             self.load_objects()
-            messagebox.showinfo("Success", f"Loaded bucket: {bucket_name}")
-        except ClientError as e:
-            error_code = e.response['Error']['Code']
-            if error_code == 'NoSuchBucket':
-                messagebox.showerror("Error", f"Bucket '{bucket_name}' does not exist")
-            elif error_code == 'AccessDenied':
-                messagebox.showerror("Permission Error", f"Access denied to bucket '{bucket_name}'. You need 's3:ListBucket' permission.")
-            else:
-                messagebox.showerror("Error", f"AWS Error ({error_code}): {e.response['Error']['Message']}")
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to access bucket: {str(e)}")
+            self.status_label.config(text=f"Status: Connected to {bucket_name}", foreground="green")
+        except Exception:
+            # Error will be shown by load_objects(), just reset status
+            self.current_bucket = None
+            self.status_label.config(text="Status: Ready", foreground="orange")
     
     def load_objects(self):
         if not self.s3_client or not self.current_bucket:
@@ -219,7 +193,16 @@ class S3ClientGUI:
         except ClientError as e:
             error_code = e.response['Error']['Code']
             if error_code == 'AccessDenied':
-                messagebox.showerror("Permission Error", f"Access denied when listing objects in bucket '{self.current_bucket}'. You need 's3:ListBucket' permission.")
+                messagebox.showerror("Permission Error", 
+                    f"Access denied when listing objects in bucket '{self.current_bucket}'.\n\n"
+                    f"Required permissions for bucket '{self.current_bucket}':\n"
+                    f"- s3:ListBucket\n"
+                    f"- s3:GetObject (for downloads)\n"
+                    f"- s3:PutObject (for uploads)\n"
+                    f"- s3:DeleteObject (for deletions)\n\n"
+                    f"Please contact your AWS administrator to grant these permissions.")
+            elif error_code == 'NoSuchBucket':
+                messagebox.showerror("Error", f"Bucket '{self.current_bucket}' does not exist or you don't have access to it.")
             else:
                 messagebox.showerror("Error", f"AWS Error ({error_code}): {e.response['Error']['Message']}")
         except Exception as e:
