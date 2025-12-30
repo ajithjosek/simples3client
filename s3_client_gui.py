@@ -27,6 +27,7 @@ class S3ClientGUI:
         
         self.s3_client = None
         self.current_bucket = None
+        self.current_prefix = None
         
         self.setup_ui()
         self.connect_to_s3()
@@ -34,12 +35,12 @@ class S3ClientGUI:
         # Load default bucket if specified
         default_bucket = os.getenv('DEFAULT_BUCKET_NAME', '')
         if default_bucket:
-            self.bucket_var.set(default_bucket)
+            self.bucket_path_var.set(default_bucket)
             # Auto-load the default bucket
-            self.load_bucket()
+            self.load_bucket_path()
     
     def setup_ui(self):
-        # Top frame for connection status and bucket input
+        # Top frame for connection status
         top_frame = ttk.Frame(self.root, padding="10")
         top_frame.grid(row=0, column=0, sticky=(tk.W, tk.E))
         
@@ -48,21 +49,28 @@ class S3ClientGUI:
         
         ttk.Button(top_frame, text="Refresh", command=self.refresh_objects).pack(side=tk.RIGHT, padx=5)
         
-        # Bucket selection frame
+        # Bucket and path selection frame
         bucket_frame = ttk.Frame(self.root, padding="10")
         bucket_frame.grid(row=1, column=0, sticky=(tk.W, tk.E))
         
-        ttk.Label(bucket_frame, text="Bucket Name:").pack(side=tk.LEFT, padx=(0, 5))
-        self.bucket_var = tk.StringVar()
-        self.bucket_entry = ttk.Entry(bucket_frame, textvariable=self.bucket_var, width=30)
-        self.bucket_entry.pack(side=tk.LEFT, padx=(0, 10))
-        self.bucket_entry.bind('<Return>', self.on_bucket_change)
+        ttk.Label(bucket_frame, text="Bucket/Path:").pack(side=tk.LEFT, padx=(0, 5))
+        self.bucket_path_var = tk.StringVar()
+        self.bucket_path_entry = ttk.Entry(bucket_frame, textvariable=self.bucket_path_var, width=50)
+        self.bucket_path_entry.pack(side=tk.LEFT, padx=(0, 10))
+        self.bucket_path_entry.bind('<Return>', self.on_bucket_path_change)
         
-        ttk.Button(bucket_frame, text="Load Bucket", command=self.load_bucket).pack(side=tk.LEFT, padx=5)
+        ttk.Button(bucket_frame, text="Load", command=self.load_bucket_path).pack(side=tk.LEFT, padx=5)
+        
+        # Help text
+        help_frame = ttk.Frame(self.root, padding=(10, 0, 10, 10))
+        help_frame.grid(row=2, column=0, sticky=(tk.W, tk.E))
+        
+        help_text = "Examples: 'my-bucket' or 'my-bucket/documents' or 'my-bucket/images/2024/'"
+        ttk.Label(help_frame, text=help_text, foreground="gray").pack(side=tk.LEFT)
         
         # Main container for objects
         main_frame = ttk.LabelFrame(self.root, text="Objects", padding="10")
-        main_frame.grid(row=2, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), padx=10)
+        main_frame.grid(row=3, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), padx=10)
         
         # Treeview for objects
         columns = ('Name', 'Size', 'Modified')
@@ -86,25 +94,18 @@ class S3ClientGUI:
         # Bind double-click for folder navigation
         self.object_tree.bind('<Double-1>', self.on_object_double_click)
         
-        # Object buttons and prefix input
+        # Object operations frame
         obj_btn_frame = ttk.Frame(self.root, padding="10")
-        obj_btn_frame.grid(row=3, column=0, sticky=(tk.W, tk.E))
-        
-        # Prefix input
-        ttk.Label(obj_btn_frame, text="Prefix/Folder:").pack(side=tk.LEFT, padx=(0, 5))
-        self.prefix_var = tk.StringVar()
-        self.prefix_entry = ttk.Entry(obj_btn_frame, textvariable=self.prefix_var, width=20)
-        self.prefix_entry.pack(side=tk.LEFT, padx=(0, 10))
+        obj_btn_frame.grid(row=4, column=0, sticky=(tk.W, tk.E))
         
         ttk.Button(obj_btn_frame, text="Upload File", command=self.upload_file).pack(side=tk.LEFT, padx=5)
         ttk.Button(obj_btn_frame, text="Download File", command=self.download_file).pack(side=tk.LEFT, padx=5)
         ttk.Button(obj_btn_frame, text="Delete File", command=self.delete_file).pack(side=tk.LEFT, padx=5)
         ttk.Button(obj_btn_frame, text="Go Up", command=self.go_up_folder).pack(side=tk.LEFT, padx=5)
-        ttk.Button(obj_btn_frame, text="Clear Prefix", command=self.clear_prefix).pack(side=tk.LEFT, padx=5)
         
         # Configure grid weights
         self.root.columnconfigure(0, weight=1)
-        self.root.rowconfigure(2, weight=1)
+        self.root.rowconfigure(3, weight=1)
     
     def connect_to_s3(self):
         try:
@@ -122,56 +123,70 @@ class S3ClientGUI:
             messagebox.showerror("Error", f"Failed to initialize S3 client: {str(e)}")
             self.status_label.config(text="Status: Initialization failed", foreground="red")
     
-    def on_bucket_change(self, event):
-        """Handle Enter key press in bucket entry"""
-        self.load_bucket()
+    def on_bucket_path_change(self, event):
+        """Handle Enter key press in bucket/path entry"""
+        self.load_bucket_path()
     
-    def load_bucket(self):
-        """Load the specified bucket"""
-        bucket_name = self.bucket_var.get().strip()
-        if not bucket_name:
-            messagebox.showwarning("Warning", "Please enter a bucket name")
+    def parse_bucket_path(self, bucket_path):
+        """Parse bucket/path string into bucket and prefix"""
+        if not bucket_path:
+            return None, None
+        
+        parts = bucket_path.split('/', 1)
+        bucket = parts[0]
+        prefix = parts[1] if len(parts) > 1 else None
+        
+        return bucket, prefix
+    
+    def load_bucket_path(self):
+        """Load the specified bucket and path"""
+        bucket_path = self.bucket_path_var.get().strip()
+        if not bucket_path:
+            messagebox.showwarning("Warning", "Please enter a bucket name or bucket/path")
             return
         
         if not self.s3_client:
             messagebox.showerror("Error", "S3 client not initialized")
             return
         
-        logger.info(f"Attempting to load bucket: {bucket_name}")
+        # Parse bucket and prefix
+        bucket, prefix = self.parse_bucket_path(bucket_path)
+        if not bucket:
+            messagebox.showerror("Error", "Invalid bucket/path format")
+            return
         
-        # Skip bucket validation - go directly to listing objects
-        # This will fail gracefully if bucket doesn't exist or no access
-        self.current_bucket = bucket_name
-        self.prefix_var.set('')  # Clear prefix when switching buckets
+        logger.info(f"Loading bucket: {bucket}, prefix: {prefix}")
         
-        # Try to load objects - this will show appropriate error if bucket is inaccessible
+        self.current_bucket = bucket
+        self.current_prefix = prefix
+        
+        # Try to load objects
         try:
             self.load_objects()
-            self.status_label.config(text=f"Status: Connected to {bucket_name}", foreground="green")
-            logger.info(f"Successfully loaded bucket: {bucket_name}")
+            if prefix:
+                self.status_label.config(text=f"Status: Browsing {bucket}/{prefix}", foreground="green")
+            else:
+                self.status_label.config(text=f"Status: Browsing {bucket}", foreground="green")
+            logger.info(f"Successfully loaded bucket/path: {bucket_path}")
         except Exception as e:
-            # Error will be shown by load_objects(), just reset status
-            logger.error(f"Failed to load bucket {bucket_name}: {e}")
+            logger.error(f"Failed to load bucket/path {bucket_path}: {e}")
             self.current_bucket = None
+            self.current_prefix = None
             self.status_label.config(text="Status: Ready", foreground="orange")
     
     def load_objects(self):
         if not self.s3_client or not self.current_bucket:
             return
         
-        logger.info(f"Loading objects from bucket: {self.current_bucket}")
+        logger.info(f"Loading objects from bucket: {self.current_bucket}, prefix: {self.current_prefix}")
         self.object_tree.delete(*self.object_tree.get_children())
         
         try:
-            # Get current prefix from entry
-            current_prefix = self.prefix_var.get().strip()
-            logger.info(f"Using prefix: '{current_prefix}'")
-            
             # List objects with prefix if specified
             kwargs = {'Bucket': self.current_bucket}
-            if current_prefix:
-                kwargs['Prefix'] = current_prefix
-                if not current_prefix.endswith('/'):
+            if self.current_prefix:
+                kwargs['Prefix'] = self.current_prefix
+                if not self.current_prefix.endswith('/'):
                     kwargs['Prefix'] += '/'
             
             logger.info(f"Calling list_objects_v2 with kwargs: {kwargs}")
@@ -190,8 +205,8 @@ class S3ClientGUI:
                     
                     # Remove current prefix from display
                     display_key = key
-                    if current_prefix:
-                        prefix_with_slash = current_prefix if current_prefix.endswith('/') else current_prefix + '/'
+                    if self.current_prefix:
+                        prefix_with_slash = self.current_prefix if self.current_prefix.endswith('/') else self.current_prefix + '/'
                         if key.startswith(prefix_with_slash):
                             display_key = key[len(prefix_with_slash):]
                     
@@ -217,7 +232,7 @@ class S3ClientGUI:
                 
                 logger.info(f"Displayed {len(folders)} folders and {len(files)} files")
             else:
-                logger.info("No 'Contents' key in response - bucket is empty or prefix has no matches")
+                logger.info("No 'Contents' key in response - bucket/path is empty or no matches")
                                           
         except ClientError as e:
             error_code = e.response['Error']['Code']
@@ -230,12 +245,12 @@ class S3ClientGUI:
                 messagebox.showerror("Permission Error", 
                     f"Access denied when listing objects in bucket '{self.current_bucket}'.\n\n"
                     f"Required permissions for bucket '{self.current_bucket}':\n"
-                    f"- s3:ListBucket\n"
+                    f"- s3:ListBucket (to browse contents)\n"
                     f"- s3:GetObject (for downloads)\n"
                     f"- s3:PutObject (for uploads)\n"
                     f"- s3:DeleteObject (for deletions)\n\n"
                     f"AWS Error: {error_message}\n\n"
-                    f"Please contact your AWS administrator to grant these permissions.")
+                    f"You can still upload/download/delete files if you know the exact object keys.")
             elif error_code == 'NoSuchBucket':
                 logger.error(f"Bucket '{self.current_bucket}' does not exist")
                 messagebox.showerror("Error", f"Bucket '{self.current_bucket}' does not exist or you don't have access to it.")
@@ -257,12 +272,20 @@ class S3ClientGUI:
         
         # If it's a folder (ends with /), navigate into it
         if object_name.endswith('/'):
-            current_prefix = self.prefix_var.get().strip()
-            if current_prefix and not current_prefix.endswith('/'):
-                current_prefix += '/'
-            new_prefix = current_prefix + object_name
-            self.prefix_var.set(new_prefix)
-            self.load_objects()
+            current_path = self.bucket_path_var.get().strip()
+            
+            # Build new path
+            if self.current_prefix:
+                new_prefix = self.current_prefix
+                if not new_prefix.endswith('/'):
+                    new_prefix += '/'
+                new_prefix += object_name
+            else:
+                new_prefix = object_name
+            
+            new_path = f"{self.current_bucket}/{new_prefix}"
+            self.bucket_path_var.set(new_path)
+            self.load_bucket_path()
     
     def format_size(self, size):
         for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
@@ -273,7 +296,7 @@ class S3ClientGUI:
     
     def upload_file(self):
         if not self.current_bucket:
-            messagebox.showwarning("Warning", "Please load a bucket first")
+            messagebox.showwarning("Warning", "Please load a bucket/path first")
             return
         
         file_path = filedialog.askopenfilename()
@@ -282,30 +305,30 @@ class S3ClientGUI:
         
         file_name = os.path.basename(file_path)
         
-        # Get prefix from entry
-        prefix = self.prefix_var.get().strip()
-        
-        # Construct the S3 key (object name)
-        if prefix:
-            # Ensure prefix ends with / if it's meant to be a folder
-            if not prefix.endswith('/'):
-                prefix += '/'
-            s3_key = prefix + file_name
+        # Construct the S3 key using current prefix
+        if self.current_prefix:
+            if not self.current_prefix.endswith('/'):
+                s3_key = self.current_prefix + '/' + file_name
+            else:
+                s3_key = self.current_prefix + file_name
         else:
             s3_key = file_name
         
         logger.info(f"Uploading file: {file_path} -> s3://{self.current_bucket}/{s3_key}")
         
         # Ask user to confirm the upload path
-        confirm_msg = f"Upload '{file_name}' as:\n'{s3_key}'\n\nProceed?"
+        confirm_msg = f"Upload '{file_name}' as:\ns3://{self.current_bucket}/{s3_key}\n\nProceed?"
         if not messagebox.askyesno("Confirm Upload", confirm_msg):
             return
         
         try:
             self.s3_client.upload_file(file_path, self.current_bucket, s3_key)
             logger.info(f"Successfully uploaded: {s3_key}")
-            messagebox.showinfo("Success", f"File uploaded as '{s3_key}'")
+            messagebox.showinfo("Success", f"File uploaded as 's3://{self.current_bucket}/{s3_key}'")
+            
+            # Refresh the current view
             self.load_objects()
+            
         except ClientError as e:
             error_code = e.response['Error']['Code']
             error_message = e.response['Error']['Message']
@@ -335,11 +358,11 @@ class S3ClientGUI:
             return
         
         # Reconstruct full S3 key
-        current_prefix = self.prefix_var.get().strip()
-        if current_prefix:
-            if not current_prefix.endswith('/'):
-                current_prefix += '/'
-            object_key = current_prefix + display_name
+        if self.current_prefix:
+            if not self.current_prefix.endswith('/'):
+                object_key = self.current_prefix + '/' + display_name
+            else:
+                object_key = self.current_prefix + display_name
         else:
             object_key = display_name
         
@@ -353,6 +376,7 @@ class S3ClientGUI:
             self.s3_client.download_file(self.current_bucket, object_key, save_path)
             logger.info(f"Successfully downloaded to: {save_path}")
             messagebox.showinfo("Success", f"File downloaded to '{save_path}'")
+            
         except ClientError as e:
             error_code = e.response['Error']['Code']
             error_message = e.response['Error']['Message']
@@ -362,7 +386,7 @@ class S3ClientGUI:
             if error_code == 'AccessDenied':
                 messagebox.showerror("Permission Error", f"Access denied when downloading file. You need 's3:GetObject' permission.\n\nAWS Error: {error_message}")
             elif error_code == 'NoSuchKey':
-                messagebox.showerror("Error", f"File '{object_key}' not found in bucket.")
+                messagebox.showerror("Error", f"File '{object_key}' not found in bucket '{self.current_bucket}'.")
             else:
                 messagebox.showerror("Error", f"AWS Error ({error_code}): {error_message}")
         except Exception as e:
@@ -384,22 +408,25 @@ class S3ClientGUI:
             return
         
         # Reconstruct full S3 key
-        current_prefix = self.prefix_var.get().strip()
-        if current_prefix:
-            if not current_prefix.endswith('/'):
-                current_prefix += '/'
-            object_key = current_prefix + display_name
+        if self.current_prefix:
+            if not self.current_prefix.endswith('/'):
+                object_key = self.current_prefix + '/' + display_name
+            else:
+                object_key = self.current_prefix + display_name
         else:
             object_key = display_name
         
         logger.info(f"Deleting file: s3://{self.current_bucket}/{object_key}")
         
-        if messagebox.askyesno("Confirm", f"Delete file '{object_key}'?"):
+        if messagebox.askyesno("Confirm", f"Delete file 's3://{self.current_bucket}/{object_key}'?"):
             try:
                 self.s3_client.delete_object(Bucket=self.current_bucket, Key=object_key)
                 logger.info(f"Successfully deleted: {object_key}")
-                messagebox.showinfo("Success", f"File '{object_key}' deleted")
+                messagebox.showinfo("Success", f"File 's3://{self.current_bucket}/{object_key}' deleted")
+                
+                # Refresh the current view
                 self.load_objects()
+                
             except ClientError as e:
                 error_code = e.response['Error']['Code']
                 error_message = e.response['Error']['Message']
@@ -416,33 +443,27 @@ class S3ClientGUI:
     
     def go_up_folder(self):
         """Navigate up one folder level"""
-        current_prefix = self.prefix_var.get().strip()
-        if not current_prefix:
+        if not self.current_prefix:
+            # Already at bucket root
             return
         
-        # Remove trailing slash
-        if current_prefix.endswith('/'):
-            current_prefix = current_prefix[:-1]
-        
-        # Find parent folder
-        if '/' in current_prefix:
-            parent_prefix = '/'.join(current_prefix.split('/')[:-1]) + '/'
+        # Remove trailing slash and go up one level
+        prefix = self.current_prefix.rstrip('/')
+        if '/' in prefix:
+            parent_prefix = '/'.join(prefix.split('/')[:-1]) + '/'
+            new_path = f"{self.current_bucket}/{parent_prefix}"
         else:
-            parent_prefix = ''
+            # Go to bucket root
+            new_path = self.current_bucket
         
-        self.prefix_var.set(parent_prefix)
-        self.load_objects()
-    
-    def clear_prefix(self):
-        """Clear the prefix to show root level"""
-        self.prefix_var.set('')
-        self.load_objects()
+        self.bucket_path_var.set(new_path)
+        self.load_bucket_path()
     
     def refresh_objects(self):
         if self.current_bucket:
             self.load_objects()
         else:
-            messagebox.showwarning("Warning", "Please load a bucket first")
+            messagebox.showwarning("Warning", "Please load a bucket/path first")
 
 if __name__ == "__main__":
     root = tk.Tk()
